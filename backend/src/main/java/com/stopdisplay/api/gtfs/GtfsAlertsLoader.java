@@ -20,6 +20,9 @@ final class GtfsAlertsLoader {
     GtfsAlertData load(String url) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(5)).GET().build();
         HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        if (response.statusCode() == 429) {
+            throw new GtfsRateLimitException("GTFS-Realtime alert download failed: HTTP 429", response.headers());
+        }
         if (response.statusCode() != 200) throw new IOException("GTFS-Realtime alert download failed: HTTP " + response.statusCode());
 
         GtfsRealtime.FeedMessage feed = GtfsRealtime.FeedMessage.parseFrom(response.body());

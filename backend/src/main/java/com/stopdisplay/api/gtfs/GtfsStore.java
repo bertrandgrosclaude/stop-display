@@ -27,23 +27,33 @@ public class GtfsStore {
     private final AtomicReference<GtfsData> data = new AtomicReference<>(new GtfsData(Map.of(), Map.of(), Map.of(), Map.of(), LocalDate.MIN, java.util.Set.of()));
     private final AtomicReference<GtfsRealtimeData> realtimeData = new AtomicReference<>(GtfsRealtimeData.empty());
     private final AtomicReference<GtfsAlertData> alertData = new AtomicReference<>(GtfsAlertData.empty());
+    private final GtfsRefreshBackoff gtfsBackoff;
+    private final GtfsRefreshBackoff tripUpdateBackoff;
+    private final GtfsRefreshBackoff alertBackoff;
     private final String url;
     private final int departuresLimit;
     private final String tripUpdateUrl;
     private final Duration tripUpdateCacheTtl;
-        private final String alertsUrl;
-        private final Duration alertsCacheTtl;
+    private final String alertsUrl;
+    private final Duration alertsCacheTtl;
 
     public GtfsStore(@Value("${gtfs.url}") String url, @Value("${gtfs.load-on-startup:true}") boolean loadOnStartup,
             @Value("${gtfs.departures-limit:4}") int departuresLimit, @Value("${gtfs.trip-update.url:}") String tripUpdateUrl,
             @Value("${gtfs.trip-update.cache-ttl-ms:20000}") long tripUpdateCacheTtlMs,
-            @Value("${gtfs.alert.url:}") String alertsUrl, @Value("${gtfs.alert.cache-ttl-ms:20000}") long alertsCacheTtlMs) {
+            @Value("${gtfs.alert.url:}") String alertsUrl, @Value("${gtfs.alert.cache-ttl-ms:20000}") long alertsCacheTtlMs,
+            @Value("${gtfs.retry.base-delay-ms:30000}") long retryBaseDelayMs,
+            @Value("${gtfs.retry.max-delay-ms:900000}") long retryMaxDelayMs) {
         this.url = url;
         this.departuresLimit = departuresLimit;
         this.tripUpdateUrl = tripUpdateUrl;
         this.tripUpdateCacheTtl = Duration.ofMillis(Math.max(1, tripUpdateCacheTtlMs));
         this.alertsUrl = alertsUrl;
         this.alertsCacheTtl = Duration.ofMillis(Math.max(1, alertsCacheTtlMs));
+        Duration retryBaseDelay = Duration.ofMillis(Math.max(1, retryBaseDelayMs));
+        Duration retryMaxDelay = Duration.ofMillis(Math.max(retryBaseDelay.toMillis(), retryMaxDelayMs));
+        this.gtfsBackoff = new GtfsRefreshBackoff(retryBaseDelay, retryMaxDelay);
+        this.tripUpdateBackoff = new GtfsRefreshBackoff(retryBaseDelay, retryMaxDelay);
+        this.alertBackoff = new GtfsRefreshBackoff(retryBaseDelay, retryMaxDelay);
         if (loadOnStartup) refresh();
     }
 
@@ -52,35 +62,60 @@ public class GtfsStore {
         refresh();
     }
 
+    @Scheduled(fixedDelayString = "${gtfs.retry.check-delay-ms:10000}", initialDelayString = "${gtfs.retry.check-delay-ms:10000}")
+    public void retryFailedGtfs() {
+        if (gtfsBackoff.hasFailures()) refreshGtfs();
+    }
+
     public void refresh() {
+        refreshGtfs();
+        refreshTripUpdates();
+        refreshAlerts();
+    }
+
+    private synchronized void refreshGtfs() {
+        Instant now = Instant.now();
+        if (!gtfsBackoff.canAttempt(now)) return;
         try {
             data.set(loader.load(url));
-            refreshTripUpdates();
-            refreshAlerts();
+            gtfsBackoff.succeeded();
         } catch (Exception exception) {
-            System.err.println("GTFS refresh failed: " + exception.getMessage());
+            Duration retryDelay = gtfsBackoff.failed(now, retryAfter(exception));
+            System.err.println("GTFS refresh failed: " + exception.getMessage() + "; retrying in " + retryDelay.toSeconds() + " seconds");
         }
     }
 
-    @Scheduled(fixedDelayString = "${gtfs.trip-update.refresh-delay-ms:10000}", initialDelayString = "${gtfs.trip-update.initial-delay-ms:0}")
-    public void refreshTripUpdates() {
+    @Scheduled(fixedDelayString = "${gtfs.trip-update.refresh-delay-ms:30000}", initialDelayString = "${gtfs.trip-update.initial-delay-ms:${gtfs.trip-update.refresh-delay-ms:30000}}")
+    public synchronized void refreshTripUpdates() {
         GtfsData snapshot = data.get();
         if (tripUpdateUrl.isBlank() || snapshot.serviceDate().equals(LocalDate.MIN)) return;
+        Instant now = Instant.now();
+        if (!tripUpdateBackoff.canAttempt(now)) return;
         try {
             realtimeData.set(realtimeLoader.load(tripUpdateUrl, snapshot.serviceDate()));
+            tripUpdateBackoff.succeeded();
         } catch (Exception exception) {
-            System.err.println("GTFS-Realtime refresh failed: " + exception.getMessage());
+            Duration retryDelay = tripUpdateBackoff.failed(now, retryAfter(exception));
+            System.err.println("GTFS-Realtime refresh failed: " + exception.getMessage() + "; retrying in " + retryDelay.toSeconds() + " seconds");
         }
     }
 
-    @Scheduled(fixedDelayString = "${gtfs.alert.refresh-delay-ms:10000}", initialDelayString = "${gtfs.alert.initial-delay-ms:0}")
-    public void refreshAlerts() {
+    @Scheduled(fixedDelayString = "${gtfs.alert.refresh-delay-ms:30000}", initialDelayString = "${gtfs.alert.initial-delay-ms:${gtfs.alert.refresh-delay-ms:30000}}")
+    public synchronized void refreshAlerts() {
         if (alertsUrl.isBlank()) return;
+        Instant now = Instant.now();
+        if (!alertBackoff.canAttempt(now)) return;
         try {
             alertData.set(alertsLoader.load(alertsUrl));
+            alertBackoff.succeeded();
         } catch (Exception exception) {
-            System.err.println("GTFS-Realtime alert refresh failed: " + exception.getMessage());
+            Duration retryDelay = alertBackoff.failed(now, retryAfter(exception));
+            System.err.println("GTFS-Realtime alert refresh failed: " + exception.getMessage() + "; retrying in " + retryDelay.toSeconds() + " seconds");
         }
+    }
+
+    private Duration retryAfter(Exception exception) {
+        return exception instanceof GtfsRateLimitException rateLimitException ? rateLimitException.retryAfter() : null;
     }
 
     public List<Stop> search(String query, int limit) {

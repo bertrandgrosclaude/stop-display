@@ -44,6 +44,9 @@ public class GtfsRealtimeInspector {
         HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
         byte[] payload;
         try (InputStream body = response.body()) {
+            if (response.statusCode() == 429) {
+                throw new GtfsRateLimitException("Feed returned HTTP 429", response.headers());
+            }
             if (response.statusCode() != 200) throw new IOException("Feed returned HTTP " + response.statusCode());
             long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
             if (contentLength > MAX_RESPONSE_BYTES) throw new IOException("Feed exceeds the 8 MB inspection limit");

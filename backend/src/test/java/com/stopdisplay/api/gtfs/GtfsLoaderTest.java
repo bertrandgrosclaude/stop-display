@@ -3,16 +3,37 @@ package com.stopdisplay.api.gtfs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.time.Duration;
 import java.util.List;
 
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 
 class GtfsLoaderTest {
+
+    @Test
+    void exposesRetryAfterWhenStaticFeedIsRateLimited() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/GTFS.zip", exchange -> {
+            exchange.getResponseHeaders().add("Retry-After", "60");
+            exchange.sendResponseHeaders(429, -1);
+        });
+        server.start();
+
+        try {
+            GtfsRateLimitException exception = assertThrows(GtfsRateLimitException.class,
+                    () -> new GtfsLoader().load("http://localhost:" + server.getAddress().getPort() + "/GTFS.zip"));
+
+            assertEquals(Duration.ofSeconds(60), exception.retryAfter());
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void loadsStaticMontpellierGtfsArchiveAndLinksDeparturesToTrips() throws Exception {

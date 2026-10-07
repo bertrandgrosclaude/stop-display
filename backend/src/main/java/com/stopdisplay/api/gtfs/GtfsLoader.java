@@ -37,7 +37,14 @@ final class GtfsLoader {
     GtfsData load(String url) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
         HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-        if (response.statusCode() != 200) throw new IOException("GTFS download failed: HTTP " + response.statusCode());
+        if (response.statusCode() != 200) {
+            try (InputStream body = response.body()) {
+                if (response.statusCode() == 429) {
+                    throw new GtfsRateLimitException("GTFS download failed: HTTP 429", response.headers());
+                }
+                throw new IOException("GTFS download failed: HTTP " + response.statusCode());
+            }
+        }
 
         Path directory = Files.createTempDirectory("stop-display-gtfs-");
         try (InputStream body = response.body()) {

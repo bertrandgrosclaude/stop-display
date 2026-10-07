@@ -2,6 +2,7 @@ package com.stopdisplay.api.gtfs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetSocketAddress;
@@ -14,6 +15,25 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.Test;
 
 class GtfsRealtimeLoaderTest {
+
+    @Test
+    void exposesRetryAfterWhenRealtimeFeedIsRateLimited() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/TripUpdate.pb", exchange -> {
+            exchange.getResponseHeaders().add("Retry-After", "45");
+            exchange.sendResponseHeaders(429, -1);
+        });
+        server.start();
+
+        try {
+            GtfsRateLimitException exception = assertThrows(GtfsRateLimitException.class, () -> new GtfsRealtimeLoader().load(
+                    "http://localhost:" + server.getAddress().getPort() + "/TripUpdate.pb", LocalDate.of(2026, 9, 30)));
+
+            assertEquals(Duration.ofSeconds(45), exception.retryAfter());
+        } finally {
+            server.stop(0);
+        }
+    }
 
     @Test
     void loadsTripUpdateForMatchingTripAndStopAndExpiresItQuickly() throws Exception {
