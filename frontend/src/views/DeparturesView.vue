@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { ChevronLeft, ChevronRight, MapPin } from '@lucide/vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ChevronLeft, ChevronRight, MapPin, Search } from '@lucide/vue'
 import type { DisplayThemeId } from '../displayThemes'
 
 type Departure = { line: string; destination: string; time: string; realtime: boolean; minutesRemaining: number | null }
 type TransitAlert = { id: string; title: string; message: string; effect: string }
 type Stop = { id: string; name: string; code: string; latitude: number; longitude: number; type: string; parentStation: string; description: string }
 type Station = { id: string; name: string; latitude: number; longitude: number; stops: Stop[]; lines: { name: string; color: string; textColor: string }[] }
+type Network = { id: string; name: string; acronym: string; website: string }
 type StopDepartures = { stop: Stop; mainLineDirection: string; departures: Departure[] }
 type CarouselSlide = { block: StopDepartures; key: string; clone: boolean }
 
-const props = defineProps<{ station: Station; favorite: boolean }>()
+const props = defineProps<{ station: Station | null; network: Network; favorite: boolean; apiStatus: string }>()
 const emit = defineEmits<{
-  back: []
+  openSearch: []
+  selectNetwork: []
   toggleFavorite: [station: Station]
 }>()
 
@@ -42,7 +44,7 @@ const carouselSlides = computed<CarouselSlide[]>(() => {
 })
 
 function lineBadgeStyle(lineName: string) {
-  const line = props.station.lines.find((stationLine) => stationLine.name === lineName)
+  const line = props.station?.lines.find((stationLine) => stationLine.name === lineName)
   return line
     ? { backgroundColor: line.color || '#3471ae', color: line.textColor || '#fff' }
     : undefined
@@ -55,7 +57,12 @@ function departureTimeLabel(departure: Departure) {
 }
 
 function stopSubtitle(block: StopDepartures) {
-  return block.stop.description?.trim() || block.mainLineDirection
+  const description = block.stop.description?.trim()
+  return description || (block.mainLineDirection ? `Direction : ${block.mainLineDirection}` : '')
+}
+
+function stopNameIsStation(block: StopDepartures) {
+  return block.stop.name.trim().localeCompare(props.station?.name.trim() ?? '', 'fr', { sensitivity: 'base' }) === 0
 }
 
 function mapUrl(stop: Stop) {
@@ -96,10 +103,18 @@ function syncCurrentStop() {
 }
 
 async function loadDepartures() {
+  const station = props.station
+  if (!station) {
+    departures.value = []
+    error.value = ''
+    return
+  }
   try {
-    const response = await fetch(`/api/stations/${encodeURIComponent(props.station.id)}/departures`)
+    const response = await fetch(`/api/stations/${encodeURIComponent(station.id)}/departures`)
     if (!response.ok) throw new Error()
-    departures.value = await response.json() as StopDepartures[]
+    const loadedDepartures = await response.json() as StopDepartures[]
+    if (props.station?.id !== station.id) return
+    departures.value = loadedDepartures
     lastUpdatedAt.value = new Date()
     error.value = ''
     currentStopIndex.value = Math.min(currentStopIndex.value, Math.max(0, departures.value.length - 1))
@@ -109,23 +124,32 @@ async function loadDepartures() {
       stopCarousel.value.scrollLeft = firstRealSlide * stopCarousel.value.clientWidth
     }
   } catch {
-    error.value = 'Départs indisponibles pour cet arrêt.'
+    if (props.station?.id === station.id) error.value = 'Départs indisponibles pour cette station.'
   }
 }
 
 async function loadAlerts() {
-  try {
-    const response = await fetch(`/api/stations/${encodeURIComponent(props.station.id)}/alerts`)
-    if (!response.ok) throw new Error()
-    alerts.value = await response.json() as TransitAlert[]
-  } catch {
+  const station = props.station
+  if (!station) {
     alerts.value = []
+    return
+  }
+  try {
+    const response = await fetch(`/api/stations/${encodeURIComponent(station.id)}/alerts`)
+    if (!response.ok) throw new Error()
+    const loadedAlerts = await response.json() as TransitAlert[]
+    if (props.station?.id === station.id) alerts.value = loadedAlerts
+  } catch {
+    if (props.station?.id === station.id) alerts.value = []
   }
 }
 
-onMounted(() => {
+watch(() => props.station?.id, () => {
   void loadDepartures()
   void loadAlerts()
+}, { immediate: true })
+
+onMounted(() => {
   refreshTimer = setInterval(() => {
     void loadDepartures()
     void loadAlerts()
@@ -141,23 +165,25 @@ onUnmounted(() => {
 <template>
   <section class="departures-page" aria-labelledby="departures-title">
     <div class="departure-device">
-      <div class="device-ridge" aria-hidden="true">
-        <span class="device-brand">SD</span>
-        <span class="device-ridge-label">INFORMATION VOYAGEURS · TaM</span>
-        <span class="device-led"></span>
+      <div class="device-ridge">
+        <img class="device-network-logo" :src="`/networks/${network.id}.png`" :alt="network.acronym" />
+        <span class="device-network-name">{{ network.name }}</span>
+        <button type="button" class="device-ridge-label" @click="emit('selectNetwork')">Changer de réseau</button>
+        <span class="device-status"><span class="device-led"></span>{{ apiStatus === 'UP' ? 'En ligne' : 'Hors ligne' }}</span>
       </div>
 
       <div class="device-controls">
-        <button type="button" class="back-button" @click="emit('back')"><ChevronLeft :size="19" aria-hidden="true" /> Recherche</button>
+        <button type="button" class="back-button" @click="emit('openSearch')"><Search :size="19" aria-hidden="true" /> Stations</button>
         <div class="device-heading">
-          <h1 id="departures-title">{{ station.name }}</h1>
-          <p>{{ station.stops.length }} arrêts · {{ station.lines.length }} lignes</p>
+          <h1 id="departures-title">{{ station?.name ?? 'Choisissez une station' }}</h1>
+          <p v-if="station">{{ station.stops.length }} arrêts · {{ station.lines.length }} lignes</p>
+          <p v-else>Ouvrez la recherche pour afficher les prochains départs.</p>
         </div>
-        <button type="button" class="favorite-button" :class="{ active: favorite }" @click="emit('toggleFavorite', station)">{{ favorite ? '★ Favori' : '☆ Ajouter' }}</button>
+        <button v-if="station" type="button" class="favorite-button" :class="{ active: favorite }" @click="emit('toggleFavorite', station)">{{ favorite ? '★ Favori' : '☆ Ajouter' }}</button>
       </div>
 
       <div class="departure-display" :class="`theme-${selectedTheme}`">
-        <header class="display-header"><span>Prochains départs</span><span>{{ station.name }} · 4 passages par arrêt</span></header>
+        <header class="display-header"><span>Prochains départs</span><span>{{ station?.name ?? network.acronym }} · {{ station ? '4 passages par arrêt' : 'Réseau de transport' }}</span></header>
         <section v-if="alerts.length" class="service-alerts" aria-label="Messages d’information">
           <div class="alerts-heading"><span class="alerts-icon" aria-hidden="true">i</span><strong>Info réseau</strong></div>
           <div class="alerts-window">
@@ -175,22 +201,25 @@ onUnmounted(() => {
             </div>
           </div>
         </section>
-        <div v-if="departures.length && !error" class="stop-carousel-controls" role="group" aria-label="Navigation entre les arrêts">
-           <button type="button" :disabled="departures.length < 2" aria-label="Arrêt précédent" @click="showStop(currentStopIndex - 1)"><ChevronLeft :size="20" aria-hidden="true" /></button>
-          <span class="stop-carousel-position" aria-live="polite">{{ currentStopIndex + 1 }} / {{ departures.length }}</span>
-           <button type="button" :disabled="departures.length < 2" aria-label="Arrêt suivant" @click="showStop(currentStopIndex + 1)"><ChevronRight :size="20" aria-hidden="true" /></button>
-        </div>
+        <p v-if="!station" class="display-empty">Choisissez une station pour commencer.</p>
         <p v-if="error" class="display-empty" role="alert">{{ error }}</p>
-        <div v-else-if="departures.length" ref="stopCarousel" class="stop-carousel" aria-label="Arrêts desservis" @scroll.passive="syncCurrentStop">
+        <div v-else-if="station && departures.length" ref="stopCarousel" class="stop-carousel" aria-label="Arrêts desservis" @scroll.passive="syncCurrentStop">
           <section v-for="slide in carouselSlides" :key="slide.key" class="stop-carousel-slide" :aria-label="slide.clone ? undefined : slide.block.stop.name" :aria-hidden="slide.clone">
             <div class="stop-heading-row">
+              <button v-if="departures.length > 1" type="button" class="stop-carousel-arrow" :tabindex="slide.clone ? -1 : 0" aria-label="Arrêt précédent" @click="showStop(currentStopIndex - 1)"><ChevronLeft :size="20" aria-hidden="true" /></button>
               <div class="stop-heading-copy">
-                <h2>{{ slide.block.stop.name }}</h2>
-                <p v-if="stopSubtitle(slide.block)" class="stop-direction">{{ stopSubtitle(slide.block) }}</p>
+                <h2 v-if="!stopNameIsStation(slide.block)">{{ slide.block.stop.name }}</h2>
+                <p v-if="stopSubtitle(slide.block)" class="stop-direction">
+                  <a class="stop-map-link" :href="mapUrl(slide.block.stop)" :tabindex="slide.clone ? -1 : 0" target="_blank" rel="noopener noreferrer" :aria-label="`Ouvrir la carte pour ${slide.block.stop.name}`">
+                    <MapPin :size="16" :stroke-width="1.8" aria-hidden="true" />
+                  </a>
+                  <span>{{ stopSubtitle(slide.block) }}</span>
+                </p>
               </div>
-              <a class="stop-map-link" :href="mapUrl(slide.block.stop)" :tabindex="slide.clone ? -1 : 0" target="_blank" rel="noopener noreferrer" :aria-label="`Ouvrir la carte pour ${slide.block.stop.name}`">
-                <MapPin :size="19" :stroke-width="2" aria-hidden="true" />
-              </a>
+              <div class="stop-heading-tools">
+                <span v-if="departures.length > 1" class="stop-carousel-position" aria-live="polite">{{ currentStopIndex + 1 }} / {{ departures.length }}</span>
+              </div>
+              <button v-if="departures.length > 1" type="button" class="stop-carousel-arrow" :tabindex="slide.clone ? -1 : 0" aria-label="Arrêt suivant" @click="showStop(currentStopIndex + 1)"><ChevronRight :size="20" aria-hidden="true" /></button>
             </div>
             <p v-if="!slide.block.departures.length" class="display-empty">Aucun départ à venir.</p>
             <div v-for="departure in slide.block.departures" v-else :key="`${slide.block.stop.id}-${departure.line}-${departure.time}`" class="departure-row">
@@ -200,14 +229,14 @@ onUnmounted(() => {
             </div>
           </section>
         </div>
-        <p v-else class="display-empty">Aucun arrêt desservi.</p>
+        <p v-else-if="station" class="display-empty">Aucun arrêt desservi.</p>
         <footer class="display-footer">
           <span>Dernière mise à jour</span>
           <time v-if="lastUpdatedAt" :datetime="lastUpdatedAt.toISOString()">{{ lastUpdatedLabel }}</time>
           <time v-else>En attente</time>
         </footer>
       </div>
-      <footer class="device-footer"><span>ÉCRAN D’INFORMATION · {{ station.name }}</span><span class="device-footer-mark">TAM / 01</span></footer>
+      <footer class="device-footer"><span>ÉCRAN D’INFORMATION · {{ station?.name ?? network.name }}</span><span class="device-footer-mark">{{ network.acronym }}</span></footer>
     </div>
   </section>
 </template>

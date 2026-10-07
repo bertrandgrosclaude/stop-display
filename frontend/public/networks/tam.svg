@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 48" role="img" aria-labelledby="title">
+  <title id="title">TaM</title>
+  <rect width="96" height="48" rx="10" fill="#d8ed78"/>
+  <path d="M13 12h24v6h-9v19h-7V18h-8zm27 0h8l7 12 7-12h8v25h-7V23l-8 13-8-13v14h-7z" fill="#17352f"/>
+  <circle cx="83" cy="35" r="4" fill="#e97854"/>
+</svg>
